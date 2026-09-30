@@ -1,0 +1,2 @@
+# NUCLEO-F411RE ST-LINK/V2.1: allow members of plugdev to access USB.
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="0483", ATTR{idProduct}=="374b", GROUP="plugdev", MODE="0660"
