@@ -1,125 +1,152 @@
-# minipjt_autopan
+# minipjt_autopan — Raspberry Pi 5
 
-ESP32-CAM의 영상을 USB 시리얼로 WSL에 수신하고, PC에서 YOLO11n으로 사람을 탐지·추적합니다. 바운딩 박스 면적이 가장 큰 사람의 중심 x좌표를 HTTP API로 제공하며, 탐지 인원수를 100ms마다 STM32에 전달해 LED 4개로 표시합니다.
+Raspberry Pi 5의 **CAM/DISP 0**에 연결한 Pi Camera에서 영상을 받아, Pi CPU에서 **YOLO11n으로 사람만 탐지**합니다. 같은 프레임에서 가장 큰 사람 바운딩 박스를 선택하고 중심 `(x, y)`를 Pi 내부 Python 호출, HTTP JSON API, 선택적 JSON Lines 출력으로 제공합니다.
 
-현재 구현은 영상 수신·사람 추적·중심 좌표 추출·LED 인원수 표시까지입니다. 팬 모터 또는 서보 제어는 아직 구현하지 않았습니다. 중심 좌표는 HTTP API에서 제공하며 STM32에는 현재 인원수를 전달합니다.
-
-## 하드웨어와 데이터 흐름
-
-- AI-Thinker ESP32-CAM + OV2640, CH340 USB-UART
-- NUCLEO-F411RE, ST-LINK/V2.1 USB 가상 시리얼
-- WSL 2 및 Windows 브라우저
-- 외부 LED 4개와 각각 330Ω 저항
+현재 범위는 카메라 입력·사람 탐지·최대 박스 선택·중심 좌표 반환·브라우저 표시입니다. GPIO 핀 배정과 LED·모터·서보 출력은 다음 지시까지 보류합니다. Raspberry Pi 실행에는 ESP32, STM32, WSL, 시리얼 브리지가 필요하지 않습니다.
 
 ```text
-ESP32-CAM → USB UART → WSL 카메라 서버 → YOLO11n/ByteTrack
-                                             ├─ 브라우저 영상 :8765
-                                             ├─ /status: 사람 수·박스·추적 ID·중심 x
-                                             └─ 100ms 조회 → USB VCP → STM32 D4~D7 LED
+Pi Camera → CAM/DISP 0 → Picamera2 BGR 프레임 → YOLO11n (CPU)
+                                               ├─ 가장 큰 사람 박스 → 중심 (x, y)
+                                               ├─ Python PersonService.read()
+                                               └─ HTTP /center · /status · 영상
 ```
 
-YOLO는 PC에서 실행합니다. 카메라 연결에 Wi-Fi를 사용하지 않습니다. 원본 영상은 320×240이며 UART 영상 전송은 921600 baud, 부팅·업로드·STM32 통신은 115200 baud입니다.
+## 카메라 연결
 
-## 프로젝트 구성
+Pi 전원을 끈 상태에서 Pi 5용 케이블로 **CAM/DISP 0**에 카메라 한 개를 연결합니다. 케이블 방향은 사용하는 카메라의 공식 안내를 따릅니다. 전원을 켠 뒤 확인합니다.
 
-| 폴더 | 내용 |
+```bash
+rpicam-hello --list-cameras
+rpicam-hello -t 5000
+```
+
+기본 프로그램은 **Picamera2 인덱스 0**을 엽니다. 카메라 한 개가 CAM/DISP 0에서 인식되면 인덱스 0으로 실행합니다. 소프트웨어 카메라 인덱스는 물리 포트 번호 자체가 아닙니다. 이후 두 번째 카메라를 추가하면 `--list-cameras`의 `Id`/`Num`과 `rpicam-hello --list-cameras`를 확인하고 `--camera-num`을 지정해야 합니다. 카메라 모델이 아직 정해지지 않았으므로 센서별 `dtoverlay`는 자동으로 수정하지 않습니다.
+
+## 설치
+
+대상은 **Raspberry Pi OS 64비트**입니다. 저장소 루트에서 실행합니다. Picamera2와 libcamera는 OS와 맞는 apt 패키지를 사용하고, 가상환경에서 시스템 패키지를 볼 수 있도록 합니다.
+
+```bash
+sudo apt update
+sudo apt install -y python3-venv python3-picamera2 python3-opencv
+python3 -m venv --system-site-packages .venv
+.venv/bin/python -m pip install -r raspberry_pi/requirements.txt
+.venv/bin/python -m pip check
+.venv/bin/python -m raspberry_pi --list-cameras
+```
+
+모델은 저장소의 `models/yolo11n.pt`를 사용합니다. 기존 PC의 `.venv`, `vendor`, 실행 바이너리를 복사하지 말고 Pi에서 새로 설치합니다. Ultralytics 및 전이 의존성은 아직 Pi에서 설치 검증한 잠금 파일로 고정하지 않았습니다. 실행 PC의 패키지 조합은 아래 검증 범위와 구분합니다.
+
+## 실행
+
+```bash
+.venv/bin/python -m raspberry_pi
+```
+
+기본값은 카메라 인덱스 0, 영상 640×480, 카메라 요청 30 FPS, 추론 입력 320, 신뢰도 0.35, CPU 추론입니다. 카메라 FPS는 탐지 FPS가 아닙니다. 추론 입력 크기가 달라도 반환 좌표는 **실제 수신 영상 크기** 기준입니다. 브라우저 주소는 Pi에서 `http://127.0.0.1:8765`입니다.
+
+다른 컴퓨터의 브라우저에서 Pi 영상을 보려면:
+
+```bash
+.venv/bin/python -m raspberry_pi --host 0.0.0.0
+# 브라우저: http://라즈베리파이의-IP:8765
+```
+
+해상도와 추론 설정은 바꿀 수 있습니다.
+
+```bash
+.venv/bin/python -m raspberry_pi --camera-num 0 --width 640 --height 480 --imgsz 640 --confidence 0.4
+.venv/bin/python -m raspberry_pi --json
+```
+
+`--json`은 완료된 탐지 프레임마다 결과를 표준 출력에 한 줄 JSON으로 내보냅니다. 카메라나 추론 오류·정지 상태는 HTTP 또는 Python `read()`로 확인합니다. 종료는 Ctrl+C이며 SIGTERM도 처리합니다. 센서 읽기가 멈추면 결과는 기본 3초 후 오래된 것으로 표시되어 중심이 `null`이 됩니다. 정상 프레임 처리 시간이 3초를 넘는 환경에서는 성능을 조정하거나 `--stale-seconds`를 지정합니다.
+
+## Pi에서 중심 좌표 받기
+
+Pi 내부 제어 프로그램은 다음 API를 조회하면 됩니다.
+
+```bash
+curl -s http://127.0.0.1:8765/center
+curl -s http://127.0.0.1:8765/status
+```
+
+`/center` 응답 예시 (실제 탐지 결과는 장면에 따라 다름):
+
+```json
+{
+  "center": {"x": 320.0, "y": 240.0},
+  "target": {
+    "class_id": 0,
+    "class": "person",
+    "confidence": 0.9,
+    "xyxy": [220.0, 100.0, 420.0, 380.0],
+    "bbox_area": 56000.0,
+    "center_x": 320.0,
+    "center_y": 240.0,
+    "center_x_normalized": 0.5,
+    "center_y_normalized": 0.5
+  },
+  "person_count": 2,
+  "frame_width": 640,
+  "frame_height": 480,
+  "inference_frames": 10,
+  "updated_at": 1790812800.0,
+  "result_age_ms": 25.0,
+  "stale": false,
+  "error": null
+}
+```
+
+- 원점: 영상 왼쪽 위. x는 오른쪽, y는 아래쪽으로 증가합니다.
+- 선택: 사람 클래스만 대상으로 `(x2-x1) × (y2-y1)`이 최대인 유효 박스. 영상 밖 부분은 경계로 보정하며 동률이면 먼저 나온 박스를 선택합니다.
+- 중심: `x=(x1+x2)/2`, `y=(y1+y2)/2`. 소수점 좌표를 유지합니다.
+- 사람이 없으면 `center`와 `target`은 `null`, `person_count`는 0입니다.
+- 준비 중·오류·종료·결과 정지 시에도 중심은 `null`입니다. `stale`, `error`, `result_age_ms`를 함께 확인합니다.
+- 박스 크기는 거리 측정값이 아닙니다. 이번 Pi 구현은 매 프레임 최대 박스를 선택하며 추적 ID를 사용하지 않습니다.
+
+`/status`에는 모든 사람 박스와 성능·카메라 정보도 포함됩니다. 기존 중심 x 필드에 대응하는 `closest_person_x`, `closest_person_y`, `closest_person`도 제공합니다. `/snapshot.jpg`는 표시 프레임, `/stream`은 MJPEG 영상입니다. 최신 유효 영상이 없으면 snapshot은 HTTP 503을 반환합니다.
+
+같은 Python 프로세스에서 결과를 반환받는 예시:
+
+```python
+import time
+from raspberry_pi.camera import PiCamera
+from raspberry_pi.service import PersonService
+from raspberry_pi.vision import PersonDetector
+
+service = PersonService(lambda: PiCamera(camera_num=0), lambda: PersonDetector())
+try:
+    service.start()
+    while True:
+        result = service.read()
+        center = result["center"]  # {"x": ..., "y": ...} 또는 None
+        if result["error"]:
+            raise RuntimeError(result["error"])
+        if center is not None:
+            print(center["x"], center["y"])
+        time.sleep(0.1)
+finally:
+    service.close()
+```
+
+카메라는 한 프로세스만 엽니다. 서버 실행 중 별도의 제어 프로세스는 새 `PiCamera`를 만들지 말고 HTTP로 조회합니다. 핀 제어는 이 반환 좌표를 소비하는 후속 단계입니다.
+
+## 구성과 검증
+
+| 경로 | 용도 |
 | --- | --- |
-| `esp32-usb-cam/UsbCamera/` | ESP32 카메라 펌웨어 |
-| `esp32-usb-cam/` | 영상 수신, 브라우저 서버, YOLO·ByteTrack, 중심 좌표 선택 |
-| `esp32-usb-cam/models/` | 실행에 사용하는 YOLO11n 사전 학습 가중치 |
-| `test_1/` | STM32F411RE LED 제어 펌웨어 및 CMake 프로젝트 |
-| `stm32-yolo-led/` | HTTP → STM32 전송과 보드 검증 스크립트 |
-| `usb-wsl/` | ST-LINK 연결·권한 설정 도구 |
-
-## 1. USB를 WSL에 연결
-
-Windows 관리자 PowerShell에서 최초 한 번 공유 설정을 합니다.
-
-```powershell
-usbipd bind --hardware-id 1a86:7523
-usbipd bind --hardware-id 0483:374b
-```
-
-WSL이 실행 중인 상태에서 일반 PowerShell:
-
-```powershell
-usbipd attach --wsl --hardware-id 1a86:7523
-usbipd attach --wsl --hardware-id 0483:374b
-```
-
-WSL에서 시리얼 권한을 설정하고 재로그인하거나 그룹을 갱신합니다.
+| `raspberry_pi/camera.py` | Picamera2 카메라 입력 |
+| `raspberry_pi/vision.py` | YOLO11n 사람 탐지, 최대 박스와 중심 선택 |
+| `raspberry_pi/service.py` | 작업 스레드, 최신 결과 반환, 오류·오래된 결과 무효화 |
+| `raspberry_pi/web.py` | 좌표 API와 브라우저 표시 |
+| `models/yolo11n.pt` | 공용 사전 학습 모델 |
+| `tests/` | 카메라 대체 장치와 결과·API 계약 시험 |
 
 ```bash
-sudo usermod -aG dialout "$USER"
-newgrp dialout
-ls -l /dev/ttyUSB* /dev/ttyACM*
+python3 -m unittest discover -s tests -v
+.venv/bin/python -m raspberry_pi.check_image
 ```
 
-ST-LINK 프로그래머 권한은 [usb-wsl 안내](usb-wsl/README.md)와 [USB–WSL 설정 문서](USB_WSL_SETUP.md)를 참고합니다. `bind`와 그룹 권한은 유지되지만 재부팅·재연결 후 `attach`가 필요할 수 있습니다.
+첫 검사는 실제 보드와 추가 라이브러리 없이 카메라 설정·선택·중심 계산·결과 무효화·서비스 자원 정리·HTTP 응답을 검사합니다. 두 번째는 설치된 Ultralytics 예제 이미지로 실제 YOLO11n 추론과 빈 화면 대상 해제를 검사합니다. 자동 검사 11개와 x86 환경의 실제 모델·서비스 경로 검사가 통과했습니다. [검증 기록](raspberry_pi/VALIDATION.md)을 참고하세요. **Pi 5 실물 카메라·ARM 의존성 설치·처리 FPS는 아직 실행 검증하지 않았습니다.** Pi에서 카메라 목록·실시간 API·다수 인원 선택·대상 소실·카메라 정지 후 무효화를 추가 확인해야 합니다.
 
-## 2. ESP32 펌웨어 업로드
-
-Arduino IDE에 ESP32 보드 패키지를 설치하고 `esp32-usb-cam/UsbCamera/UsbCamera.ino`를 엽니다. 보드는 **AI Thinker ESP32-CAM**, 업로드 속도는 **115200**으로 선택합니다. Arduino-ESP32 3.3.12에서 빌드·업로드를 확인했습니다.
-
-Windows IDE를 사용할 때는 CH340을 WSL에서 먼저 detach합니다. 자동 다운로드를 지원하지 않는 어댑터는 GPIO0–GND 연결 후 RESET으로 업로드하고, 실행 시 GPIO0–GND를 해제합니다. 기존 플래시 백업과 빌드 바이너리는 저장소에 포함하지 않습니다.
-
-## 3. 영상·YOLO 실행
-
-저장소 루트에서 Python 환경을 만듭니다.
-
-```bash
-python3 -m venv .venv
-.venv/bin/pip install -r esp32-usb-cam/requirements-yolo.txt
-.venv/bin/python esp32-usb-cam/web-preview.py --port /dev/ttyUSB0 --yolo
-```
-
-Windows 브라우저에서 **http://localhost:8765**를 엽니다. 기본 노출값은 수동 300입니다. 밝기에 따라 `--exposure 150` 등으로 조정하고, 자동 노출은 `--exposure 0`을 사용합니다. GPU 지원은 PyTorch/CUDA 설치 환경에 따라 달라지며, `--device cpu`로 CPU를 지정할 수 있습니다.
-
-카메라만 확인하려면 `--yolo`를 생략합니다. 정상 실내 장면에서 약 5~6 FPS를 확인했습니다. 장면의 JPEG 크기와 UART 누락에 따라 달라집니다.
-
-## 4. STM32 빌드·업로드와 LED 전송
-
-Arm GNU Toolchain, CMake, Ninja, STM32CubeProgrammer를 설치하고 실행 파일을 PATH에 등록합니다.
-
-```bash
-cmake -S test_1 -B test_1/build/Debug -G Ninja -DCMAKE_BUILD_TYPE=Debug
-cmake --build test_1/build/Debug
-STM32_Programmer_CLI -c port=SWD mode=UR -w test_1/build/Debug/test_1.elf -v -rst
-```
-
-YOLO 서버를 실행한 채 다른 터미널에서:
-
-```bash
-.venv/bin/python stm32-yolo-led/bridge.py --port /dev/ttyACM0
-```
-
-각 핀 → 330Ω 저항 → LED 긴 다리(+), LED 짧은 다리(-) → GND로 연결합니다. 1명부터 D4→D5→D6→D7 순서로 켜지고, 4명 이상이면 모두 켜집니다. D4=PB5, D5=PB4, D6=PB10, D7=PA8입니다. 내장 LD2는 최근 유효한 데이터 수신 상태를 나타냅니다.
-
-HTTP 조회와 STM32 전송은 100ms 주기이며 카메라 추론이 그보다 느리면 같은 결과를 반복 전달합니다. 카메라·추론 오류나 1초 이상 결과 정지 시 0명을 전송하고, STM32도 통신이 1초 이상 끊기면 LED를 끕니다. `bridge-status.json`에서 실제 조회 간격과 ACK 수를 확인합니다.
-
-## 좌표 API
-
-```bash
-curl -s http://localhost:8765/status
-```
-
-`person_count`, `detections`, `closest_person_x`, `closest_person`, `frame_width`, `frame_height`를 제공합니다. 사람 박스는 `xyxy: [왼쪽 x, 위쪽 y, 오른쪽 x, 아래쪽 y]`입니다.
-
-`closest_person_x = (왼쪽 x + 오른쪽 x) / 2`이며 원본 픽셀 좌표입니다. 현재 화면 중앙은 x=160입니다. 대상이 없으면 `closest_person_x`와 `closest_person`은 `null`입니다. `closest_person.track_id`는 신규 검출이 추적 궤적으로 확정되기 전에는 `null`일 수 있습니다.
-
-단안 카메라에서 **박스 면적이 가장 큰 사람을 가장 가까운 사람으로 추정**합니다. 실제 거리 측정은 아니며 체격·자세·가림에 영향을 받습니다. 선택한 대상은 노란 박스와 중심 십자로 표시됩니다. 영상 원본은 `/raw.jpg`, 표시된 프레임은 `/snapshot.jpg`에서 확인할 수 있습니다.
-
-## 검증
-
-```bash
-.venv/bin/python esp32-usb-cam/check-closest-person.py
-.venv/bin/python esp32-usb-cam/check-live-center.py
-# 실행 중인 STM32 브리지를 종료한 뒤 수행
-.venv/bin/python stm32-yolo-led/check-board.py --port /dev/ttyACM0
-```
-
-실제 보드에서 18가지 인원수·표시 모드, 검사 바이트 오류 무시, 1초 통신 중단 소등을 검증했습니다. 사람 여러 명의 예제에서 최대 면적 선택·중점 계산·추적 ID 유지·대상 해제를 확인했고, 실제 카메라 HTTP 응답에서도 중심 x좌표를 확인했습니다. 이 시험은 탐지 정확도나 실제 거리의 정확도를 보증하는 시험은 아닙니다.
-
-실행 중 카메라가 흰 화면이 되는 현상이 있었습니다. 노출값 조정만으로 복구되지 않는 경우도 있었고, 카메라 펌웨어 재기록 후 정상 영상으로 복구했습니다. `/raw.jpg`와 `/status`의 `camera_warning`으로 원본 상태를 확인합니다.
-
-YOLO 가중치·Ultralytics 및 STM32 생성 코드의 출처는 [THIRD_PARTY.md](THIRD_PARTY.md)에 기록합니다.
+참고: [Picamera2 공식 문서](https://github.com/raspberrypi/picamera2), [Picamera2 매뉴얼](https://datasheets.raspberrypi.com/camera/picamera2-manual.pdf), [Ultralytics Raspberry Pi 안내](https://docs.ultralytics.com/guides/raspberry-pi/), [타사 구성 요소](THIRD_PARTY.md).
