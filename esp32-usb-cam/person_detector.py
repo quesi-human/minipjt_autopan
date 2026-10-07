@@ -1,4 +1,5 @@
-"""YOLO11n person-only detection on a decoded USB camera frame."""
+"""YOLO person-only detection on a decoded USB camera frame."""
+from pathlib import Path
 import time
 
 import cv2
@@ -6,11 +7,13 @@ import numpy as np
 import torch
 from ultralytics import YOLO
 from closest_person import select_closest_person
+from lanyard_classifier import classify_lanyard
 
 
 class PersonDetector:
     def __init__(self, model_path, confidence=0.35, image_size=640, device="auto"):
         self.model = YOLO(str(model_path))
+        self.model_name = Path(model_path).stem
         if self.model.names[0] != "person":
             raise ValueError("사람 클래스가 0인 COCO 탐지 모델이 필요합니다")
         self.confidence = confidence
@@ -38,15 +41,20 @@ class PersonDetector:
                                   tracker="bytetrack.yaml", persist=True,
                                   verbose=False)[0]
         detections = []
+        clean_frame = frame.copy()
         for box in result.boxes.cpu():
             x1, y1, x2, y2 = [int(round(value)) for value in box.xyxy[0].tolist()]
             score = float(box.conf[0])
             track_id = int(box.id[0]) if box.id is not None else None
+            classification = classify_lanyard(clean_frame, [x1, y1, x2, y2])
             detections.append({"class": "person", "confidence": round(score, 4),
-                               "xyxy": [x1, y1, x2, y2], "track_id": track_id})
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 100), 2)
-            cv2.putText(frame, f"person #{track_id} {score:.2f}", (x1, max(12, y1 - 4)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 100), 1)
+                               "xyxy": [x1, y1, x2, y2], "track_id": track_id,
+                               **classification})
+            color = {"student": (255, 220, 80), "staff": (80, 200, 255),
+                     "unknown": (160, 160, 160)}[classification["role"]]
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+            cv2.putText(frame, f"{classification['role']} #{track_id} {score:.2f}",
+                        (x1, max(12, y1 - 4)), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
         self.closest_person = select_closest_person(detections, self.frame_width, self.frame_height)
         if self.closest_person is not None:
             target = self.closest_person
@@ -57,7 +65,7 @@ class PersonDetector:
             cv2.putText(frame, f"closest #{target['track_id']} x={target['center_x']:.1f}",
                         (5, self.frame_height - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
                         (0, 220, 255), 1)
-        cv2.putText(frame, f"YOLO11n | people: {len(detections)}", (5, 16),
+        cv2.putText(frame, f"{self.model_name} | people: {len(detections)}", (5, 16),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 100), 1)
         success, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
         if not success:

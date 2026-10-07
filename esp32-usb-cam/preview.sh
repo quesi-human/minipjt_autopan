@@ -9,4 +9,4 @@ if [[ ! -x "$camera_python" ]]; then
   echo 'README의 Python 환경 설치를 먼저 수행하세요.' >&2
   exit 1
 fi
-exec "$camera_python" "$camera_script_dir/capture.py" --preview --no-save --reset --quiet --frames 100000 "$@"
+exec "$camera_python" "$camera_script_dir/web-preview.py" --yolo "$@"

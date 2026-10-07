@@ -45,7 +45,9 @@ def receive_frame(port, timeout):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--port", default="/dev/ttyUSB0")
+    parser.add_argument("--port", default="/dev/ttyACM0")
+    parser.add_argument("--initial-baud", type=int, default=115200,
+                        choices=(115200, 230400, 460800, 921600, 1500000, 2000000))
     parser.add_argument("--baud", type=int, default=921600,
                         choices=(115200, 230400, 460800, 921600, 1500000, 2000000))
     parser.add_argument("--frames", type=int, default=3)
@@ -55,8 +57,8 @@ def main():
     parser.add_argument("--no-save", action="store_true", help="미리보기 중 JPEG 파일 저장 생략")
     parser.add_argument("--reset", action="store_true", help="RTS로 보드를 리셋한 뒤 수신 (자동 리셋 지원 어댑터)")
     parser.add_argument("--quiet", action="store_true", help="프레임별 로그 생략, 최종 FPS만 출력")
-    parser.add_argument("--chunk", type=int, default=64, choices=(32, 64, 128, 256))
-    parser.add_argument("--gap-us", type=int, default=1000)
+    parser.add_argument("--chunk", type=int, default=256, choices=(32, 64, 128, 256))
+    parser.add_argument("--gap-us", type=int, default=250)
     args = parser.parse_args()
     if args.frames < 1 or args.timeout <= 0:
         parser.error("frames와 timeout은 양수여야 합니다")
@@ -71,7 +73,7 @@ def main():
     if not args.no_save:
         args.output.mkdir(parents=True, exist_ok=True)
     port = serial.Serial()
-    port.port, port.baudrate, port.timeout = args.port, 115200, 0.2
+    port.port, port.baudrate, port.timeout = args.port, args.initial_baud, 0.2
     port.dtr = port.rts = False
     port.open()
     try:

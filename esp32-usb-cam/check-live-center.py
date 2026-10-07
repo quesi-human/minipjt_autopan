@@ -1,13 +1,20 @@
 """Check current HTTP center coordinates; save a live person result when present."""
+import argparse
 import json
 from pathlib import Path
 import time
 import urllib.request
 
-deadline = time.monotonic() + 20
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--url', default='http://127.0.0.1:8766/status')
+parser.add_argument('--wait-seconds', type=float, default=20)
+args = parser.parse_args()
+if args.wait_seconds < 0:
+    parser.error('wait-seconds must be nonnegative')
+deadline = time.monotonic() + args.wait_seconds
 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 while True:
-    with opener.open('http://127.0.0.1:8765/status', timeout=2) as response:
+    with opener.open(args.url, timeout=2) as response:
         status = json.load(response)
     target = status['closest_person']
     assert status['error'] is None and status['camera_warning'] is None, status

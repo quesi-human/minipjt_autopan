@@ -1,4 +1,5 @@
 """Verify nearest-box selection and stable tracking on the YOLO example image."""
+import argparse
 import json
 from pathlib import Path
 import cv2
@@ -6,7 +7,10 @@ import numpy as np
 import ultralytics
 from person_detector import PersonDetector
 
-detector = PersonDetector(Path(__file__).parent / 'models/yolo11n.pt')
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--model', type=Path, default=Path(__file__).resolve().parents[1] / 'models/yolo11m.pt')
+args = parser.parse_args()
+detector = PersonDetector(args.model)
 source = Path(ultralytics.__file__).parent / 'assets/bus.jpg'
 frame = cv2.resize(cv2.imread(str(source)), (320, 240))
 success, encoded = cv2.imencode('.jpg', frame)

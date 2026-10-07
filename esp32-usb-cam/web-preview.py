@@ -23,12 +23,13 @@ p{color:#9cabbc;line-height:1.6}
 </style><main><h1>ESP32-CAM · USB 실시간 영상</h1><div id="status">카메라 연결 중…</div>
 <div class="screen" id="screen"><img src="/stream" alt="카메라 연결 중"></div>
 <button onclick="document.getElementById('screen').requestFullscreen()">전체 화면</button>
-<p>USB로 수신한 320×240 영상을 확대 표시합니다. 가장 큰 사람 박스를 가까운 대상으로 추정해 노란색으로 표시하고 중심 x좌표를 제공합니다.<br>
+<p>카메라 영상을 실시간으로 표시합니다. 전체 화면 버튼으로 크게 볼 수 있습니다.<br>
 전체 화면 종료: Esc</p></main>
 <script>setInterval(async()=>{try{const r=await fetch('/status',{cache:'no-store'});const s=await r.json();
 document.getElementById('status').textContent=s.error?'연결 오류: '+s.error:
 s.frames?`USB ${s.fps.toFixed(1)} FPS · 누락 ${s.dropped}`+
 (s.yolo_enabled?` · YOLO ${s.inference_fps.toFixed(1)} FPS · 사람 ${s.person_count}명 · ${s.inference_ms.toFixed(1)} ms · ${s.yolo_status}`:' · 탐지 비활성')+
+(s.yolo_enabled?` · 줄 색 추정: 학생 ${s.role_counts.student} · 직원 ${s.role_counts.staff} · 미확인 ${s.role_counts.unknown}`:'')+
 (s.yolo_enabled?(s.closest_person?` · 가까운 대상 #${s.closest_person.track_id} · 중심 x=${s.closest_person.center_x.toFixed(1)}`:' · 추적 대상 없음'):'')+
 (s.camera_warning?' · '+s.camera_warning:''):'카메라 연결 중…';
 }catch(e){document.getElementById('status').textContent='미리보기 서버 연결 끊김';}},500);</script></html>"""
@@ -40,13 +41,14 @@ state = {"jpeg": None, "raw_jpeg": None, "frames": 0, "output_frames": 0,
          "yolo_enabled": False, "yolo_status": "비활성", "model": None,
          "device": None, "inference_fps": 0, "inference_ms": 0,
          "person_count": 0, "detections": [], "inference_frames": 0, "camera_warning": None,
+         "role_counts": {"student": 0, "staff": 0, "unknown": 0},
          "closest_person": None, "closest_person_x": None,
          "closest_person_method": "largest_bbox_area", "frame_width": 320, "frame_height": 240}
 
 
 def camera_worker(args):
     port = serial.Serial()
-    port.port, port.baudrate, port.timeout = args.port, 115200, 0.2
+    port.port, port.baudrate, port.timeout = args.port, args.initial_baud, 0.2
     port.dtr = port.rts = False
     try:
         port.open()
@@ -58,7 +60,8 @@ def camera_worker(args):
         commands = [(b"E0\n", b"EXPOSURE 0")]
         if args.exposure:
             commands.append((f"E{args.exposure}\n".encode(), f"EXPOSURE {args.exposure}".encode()))
-        commands.append((b"T64,1000\n", b"TRANSFER 64 1000"))
+        commands.append((f"T{args.chunk},{args.gap_us}\n".encode(),
+                         f"TRANSFER {args.chunk} {args.gap_us}".encode()))
         if args.baud != 115200:
             commands.append((f"B{args.baud}\n".encode(), f"BAUD {args.baud}".encode()))
         for command, expected in commands:
@@ -115,7 +118,7 @@ def detector_worker(args):
         with condition:
             state["yolo_status"] = "실행 중"
             state["device"] = detector.device_name
-        print(f"YOLO11n 준비 완료: {detector.device_name}", flush=True)
+        print(f"{args.model.stem} 준비 완료: {detector.device_name}", flush=True)
         last_frame = -1
         started = None
         while not stop.is_set():
@@ -139,6 +142,8 @@ def detector_worker(args):
                 state["inference_fps"] = state["inference_frames"] / (time.monotonic() - started)
                 state["person_count"] = len(detections)
                 state["detections"] = detections
+                state["role_counts"] = {role: sum(d["role"] == role for d in detections)
+                                        for role in ("student", "staff", "unknown")}
                 state["closest_person"] = detector.closest_person
                 state["closest_person_x"] = (detector.closest_person["center_x"]
                                              if detector.closest_person is not None else None)
@@ -216,18 +221,26 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--port", default="/dev/ttyUSB0")
-    parser.add_argument("--http-port", type=int, default=8765)
+    parser.add_argument("--port", default="/dev/ttyACM0")
+    parser.add_argument("--initial-baud", type=int, default=115200,
+                        choices=(115200, 230400, 460800, 921600, 1500000, 2000000),
+                        help="현재 장치의 통신 속도 (부팅 직후 115200)")
+    parser.add_argument("--http-port", type=int, default=8766)
+    parser.add_argument("--chunk", type=int, default=256, choices=(32, 64, 128, 256))
+    parser.add_argument("--gap-us", type=int, default=250,
+                        help="UART 전송 청크 사이 대기 시간 (0~5000 마이크로초)")
     parser.add_argument("--baud", type=int, default=921600,
                         choices=(115200, 230400, 460800, 921600, 1500000, 2000000))
-    parser.add_argument("--yolo", action="store_true", help="YOLO11n 사람 탐지 활성화")
-    parser.add_argument("--model", type=Path, default=Path(__file__).parent / "models/yolo11n.pt")
+    parser.add_argument("--yolo", action="store_true", help="YOLO 사람 탐지 활성화")
+    parser.add_argument("--model", type=Path, default=Path(__file__).resolve().parents[1] / "models/yolo11m.pt")
     parser.add_argument("--confidence", type=float, default=0.35)
     parser.add_argument("--imgsz", type=int, default=640)
     parser.add_argument("--device", default="auto", help="auto, cpu, 0 등")
-    parser.add_argument("--exposure", type=int, default=300,
-                        help="OV2640 노출: 0 자동, 1~1200 수동 (기본 300)")
+    parser.add_argument("--exposure", type=int, default=150,
+                        help="OV2640 노출: 0 자동, 1~1200 수동 (기본 150)")
     args = parser.parse_args()
+    if not 0 <= args.gap_us <= 5000:
+        parser.error("gap-us는 0~5000이어야 합니다")
     state["baud"] = args.baud
     if not 0 <= args.exposure <= 1200:
         parser.error("exposure는 0~1200이어야 합니다")

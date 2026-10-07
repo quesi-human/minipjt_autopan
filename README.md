@@ -1,125 +1,138 @@
-# minipjt_autopan
+# STM32–ESP32-CAM 사람 탐지
 
-ESP32-CAM의 영상을 USB 시리얼로 WSL에 수신하고, PC에서 YOLO11n으로 사람을 탐지·추적합니다. 바운딩 박스 면적이 가장 큰 사람의 중심 x좌표를 HTTP API로 제공하며, 탐지 인원수를 100ms마다 STM32에 전달해 LED 4개로 표시합니다.
+NUCLEO-F103RB에서 ESP32-CAM에 전원을 공급하고 UART 영상을 PC로 중계합니다.
+PC에서 YOLO11m으로 사람을 탐지·추적하고, 목걸이 줄 색으로 학생·직원을 추정합니다.
 
-현재 구현은 영상 수신·사람 추적·중심 좌표 추출·LED 인원수 표시까지입니다. 팬 모터 또는 서보 제어는 아직 구현하지 않았습니다. 중심 좌표는 HTTP API에서 제공하며 STM32에는 현재 인원수를 전달합니다.
-
-## 하드웨어와 데이터 흐름
-
-- AI-Thinker ESP32-CAM + OV2640, CH340 USB-UART
-- NUCLEO-F411RE, ST-LINK/V2.1 USB 가상 시리얼
-- WSL 2 및 Windows 브라우저
-- 외부 LED 4개와 각각 330Ω 저항
+현재 카메라 중계·LD2 통신 표시·GPU 사람 탐지는 실제 보드에서 동작을 확인했습니다.
+학생/직원 분류는 아직 색상 규칙 기반 시험 구현이며, 사용자가 실제 영상에서 낮은 정확도를 보고했습니다.
+현재 STM32 빌드는 **F103RB 전용**입니다. F411RE로 교체하려면 보드 지원을 다시 추가해야 합니다.
 
 ```text
-ESP32-CAM → USB UART → WSL 카메라 서버 → YOLO11n/ByteTrack
-                                             ├─ 브라우저 영상 :8765
-                                             ├─ /status: 사람 수·박스·추적 ID·중심 x
-                                             └─ 100ms 조회 → USB VCP → STM32 D4~D7 LED
+ESP32-CAM ↔ STM32F103RB ↔ ST-LINK USB ↔ PC YOLO11m ↔ 브라우저
 ```
 
-YOLO는 PC에서 실행합니다. 카메라 연결에 Wi-Fi를 사용하지 않습니다. 원본 영상은 320×240이며 UART 영상 전송은 921600 baud, 부팅·업로드·STM32 통신은 115200 baud입니다.
-
-## 프로젝트 구성
-
-| 폴더 | 내용 |
+| 경로 | 용도 |
 | --- | --- |
-| `esp32-usb-cam/UsbCamera/` | ESP32 카메라 펌웨어 |
-| `esp32-usb-cam/` | 영상 수신, 브라우저 서버, YOLO·ByteTrack, 중심 좌표 선택 |
-| `esp32-usb-cam/models/` | 실행에 사용하는 YOLO11n 사전 학습 가중치 |
-| `test_1/` | STM32F411RE LED 제어 펌웨어 및 CMake 프로젝트 |
-| `stm32-yolo-led/` | HTTP → STM32 전송과 보드 검증 스크립트 |
-| `usb-wsl/` | ST-LINK 연결·권한 설정 도구 |
+| `test_1/` | F103RB UART 중계 펌웨어·LD2 통신 표시 |
+| `esp32-usb-cam/` | ESP32 촬영 펌웨어, PC 영상 수신·탐지·색상 분류 |
+| `models/` | YOLO 가중치 (`yolo11m.pt`: 현재 PC, `yolo11n.pt`: 별도 Pi 구현) |
+| `usb-wsl/` | ST-LINK WSL 연결·권한 설정 |
+| `tests/` | 프레임·색상 분류·Pi 서비스 시험 |
+| `raspberry_pi/` | 별도 Pi 카메라 구현, [설치·실행 안내](raspberry_pi/README.md) |
+| `docker-class/` | 로컬에 보존한 Docker 수업 예제 (Git 제외) |
 
-## 1. USB를 WSL에 연결
+## 시도와 변경 이력
 
-Windows 관리자 PowerShell에서 최초 한 번 공유 설정을 합니다.
+기록은 당시 관측값과 수행 순서를 정리한 것입니다. FPS는 촬영 장면과 PC 부하가 달라
+서로 다른 시험 사이의 정확한 성능 비교나 보장값으로 사용할 수 없습니다.
+아래에서 제거한 시험 코드와 옛 구성은 현재 실행 방법이 아닌 개발 이력입니다.
 
-```powershell
-usbipd bind --hardware-id 1a86:7523
-usbipd bind --hardware-id 0483:374b
-```
+### 2026-09-30 — F411RE와 USB 카메라 초기 구성
 
-WSL이 실행 중인 상태에서 일반 PowerShell:
+ESP32-CAM/CAM-MB에서 PC로 UART JPEG를 보내고 YOLO11n·ByteTrack으로 사람을 탐지했습니다.
+PC가 사람 수를 STM32F411RE에 전달해 외부 LED 네 개로 표시하는 경로를 구현했습니다.
+최대 면적 사람 박스와 중심 x좌표도 제공했습니다. ST-LINK WSL 공유·권한·재연결을 확인했고,
+인원수·모드 18가지, 잘못된 체크섬 무시, 통신 중단 후 LED 소등을 시험했습니다.
 
-```powershell
-usbipd attach --wsl --hardware-id 1a86:7523
-usbipd attach --wsl --hardware-id 0483:374b
-```
+### 2026-10-01 — Raspberry Pi 별도 구현과 이식 점검
 
-WSL에서 시리얼 권한을 설정하고 재로그인하거나 그룹을 갱신합니다.
+Pi Camera → Picamera2 → YOLO11n(CPU) → 중심 좌표/HTTP 영상 경로를 별도로 구현했습니다.
+서비스·좌표·HTTP 자동 시험 11개와 x86 예제 추론을 확인했습니다.
+Pi 5 실물 CSI 카메라와 ARM 의존성 설치·FPS는 아직 검증하지 않았습니다.
+이 구성은 [raspberry_pi](raspberry_pi/README.md)에 보존돼 있으며 현재 STM32 영상 경로와 별개입니다.
 
-```bash
-sudo usermod -aG dialout "$USER"
-newgrp dialout
-ls -l /dev/ttyUSB* /dev/ttyACM*
-```
+### 2026-10-07 — F103RB 연결부터 현재 구성까지
 
-ST-LINK 프로그래머 권한은 [usb-wsl 안내](usb-wsl/README.md)와 [USB–WSL 설정 문서](USB_WSL_SETUP.md)를 참고합니다. `bind`와 그룹 권한은 유지되지만 재부팅·재연결 후 `attach`가 필요할 수 있습니다.
+| 순서 | 시도·문제 | 변경과 관측 결과 |
+| --- | --- | --- |
+| 1 | 사용 보드와 F411 배선 재확인 | 실제 보드는 NUCLEO-F103RB, MCU ID `0x410`, Cortex-M3, Flash 128KB/RAM 20KB임을 확인했습니다. D8/PA9 TX → U0R, D2/PA10 RX ← U0T, 5V/GND 배선을 기준으로 F103 지원을 추가했습니다. |
+| 2 | STM32 단독 통신 시험 | USART2/ST-LINK VCP로 18개 인원수·모드 ACK, 체크섬 오류 무시, 약 1초 통신 중단 후 상태 초기화를 확인했습니다. USART1 직접 통신 모드도 빌드·업로드했습니다. |
+| 3 | ESP32에 시험 펌웨어 기록 | ESP32 Flash 4MB를 백업하고 Arduino-ESP32 2.0.17로 UART 시험 펌웨어를 빌드·업로드했습니다. USB에서 8초간 정상 패킷 28개와 0/1 전환을 확인했습니다. |
+| 4 | STM32 전원 공급·직접 UART 첫 시험 | 처음에는 정상 패킷 0개였습니다. ESP32 리셋 후 2바이트와 UART 프레이밍 오류 15개를 관측했지만, 이 결과만으로 전원 부족이나 보드 고장을 확정할 수 없었습니다. |
+| 5 | 멀티미터와 USB 전원 대조 | 처음 제시된 ‘25mA’는 `mV~` 모드 측정으로 정정돼 전류값으로 사용하지 않았습니다. 사용자가 ESP32 5V 단자 5.07V/3V3 단자 3.84V를 보고했고, 이후 USB 구성에서 전압이 괜찮다고 알려줬습니다. USB UART 재시험에서 정상 패킷 29개를 확인했습니다. 측정값은 도구로 독립 검증하지 않았습니다. |
+| 6 | CAM-MB 장착 상태에서 GPIO13/14 UART2 우회 | 송신 카운터는 증가했지만 ACK는 없었습니다. 이후 CAM-MB 때문에 핀에 접근할 수 없어 점퍼선이 아예 연결되지 않은 상태임을 확인했습니다. 이 실패를 전원·UART 고장 근거로 사용하지 않았습니다. |
+| 7 | USB 두 포트를 PC에서 중계 | ESP32 USB와 STM32 USB 사이를 PC가 중계해 12초간 패킷 44개/ACK 44개, 검사 오류·ACK 불일치 0을 확인했습니다. 보드 사이 직접 배선 시험은 아니었습니다. |
+| 8 | ESP32-CAM 단독 촬영 확인 | 카메라 펌웨어로 바꿔 CAM-MB USB 영상을 브라우저에 표시했습니다. 320×240 JPEG 441프레임, 약 5.60 FPS, 누락 5프레임을 관측했습니다. USB 전원에서 실제 촬영이 가능함을 확인했습니다. |
+| 9 | PC ↔ STM32 ↔ ESP32-CAM 중계와 LD2 | F103에 USART2↔USART1 중계, 1KB 큐 두 개, HSI PLL 64MHz를 적용했습니다. 정상 ECAM CRC/JPEG 프레임만 LD2를 켜고 마지막 정상 프레임 이후 2초에 끄도록 바꿨습니다. |
+| 10 | STM32 전원 공급 상태에서 USB 재연결 시험 | `I` 명령에 `CAM_INFO` 응답 62바이트를 받았고 STM32를 통해 JPEG 3장을 수신했습니다. CRC/JPEG 모두 정상, 약 1.96 FPS, UART 오류·버퍼 넘침 0, LD2 점등과 수신 중단 후 소등을 확인했습니다. 현재 공급 경로에서 촬영이 성공했지만 초기 실패 원인과 전원 여유를 확정한 것은 아닙니다. |
+| 11 | UART 속도 확대 | ESP32의 `BAUD` 응답을 기존 속도로 PC에 전달한 뒤 STM32의 두 UART 속도를 함께 변경하도록 수정했습니다. 115200/460800/921600bps에서 각 25장씩 모두 CRC/JPEG 검증을 통과했고, 같은 전송 조건에서 2.42/6.57/9.23 FPS를 관측했습니다. |
+| 12 | 전송 대기 축소 | 청크 64→256바이트, 간격 1000→250µs로 바꿨습니다. 921600bps에서 카메라 전용 영상 약 20 FPS, 640프레임 시점 누락·오류 0을 확인했습니다. 센서 원본 해상도는 320×240을 유지했습니다. |
+| 13 | 어두운 영상의 노출 조절 | 자동/수동 노출을 비교해 150을 선택했습니다. 자동 노출 평균 휘도 약 43/255 → 수동 150에서 138/255로 밝아졌고 약 16.6 FPS를 확인했습니다. `--initial-baud`를 추가해 고속 상태에서 서버만 재시작할 수 있게 했습니다. |
+| 14 | YOLO11n 사람 탐지 연결 | RTX 5060 Ti에서 탐지·ByteTrack·박스·사람 수·중심 좌표를 표시했습니다. 실제 사람 탐지와 결과 갱신을 확인했고 약 13~16 FPS를 관측했습니다. |
+| 15 | YOLO11n → YOLO11s | 사람 탐지를 더 큰 모델로 바꾸고 영상·시작 로그에 실제 모델 이름을 표시하도록 수정했습니다. 447프레임 시점 약 13 FPS, 오류·누락 0을 확인했습니다. 정답 데이터에 대한 정확도 비교는 수행하지 않았습니다. |
+| 16 | 목걸이 줄로 학생/직원 구분 | 하늘색 → 학생, 검정색 → 직원 규칙을 추가했습니다. 상체의 가는 색상 패턴을 검사하고, 작은/잘린 사람·모호한 패턴은 미확인으로 표시합니다. 합성 시험 7개는 통과했지만 사용자가 실제 분류 정확도가 낮다고 보고했습니다. |
+| 17 | YOLO11s → YOLO11m | 사람 탐지 모델을 다시 확대했습니다. 160프레임 시점 약 17.4 FPS, 추론 21.9ms, 오류·누락 0을 확인했습니다. 줄 분류는 별도의 색상 규칙이므로 모델 확대에 따른 학생/직원 분류 개선은 검증하지 않았습니다. |
+| 18 | 프로젝트 정리와 재검증 | 옛 F411 LED·인원수 UART 시험 코드, 중복 문서, vendor·오래된 빌드/촬영 산출물을 정리했습니다. F103 전용 빌드와 현재 실행 기본값을 통일하고 Pi 구현·로컬 Docker 예제·Flash 백업은 보존했습니다. 폴더 크기는 약 168→59MB로 줄었습니다. |
 
-## 2. ESP32 펌웨어 업로드
+### 정리 이후 확인한 결과
 
-Arduino IDE에 ESP32 보드 패키지를 설치하고 `esp32-usb-cam/UsbCamera/UsbCamera.ino`를 엽니다. 보드는 **AI Thinker ESP32-CAM**, 업로드 속도는 **115200**으로 선택합니다. Arduino-ESP32 3.3.12에서 빌드·업로드를 확인했습니다.
+- 자동 시험 **26개 통과**: 카메라 프레임 8개, 목걸이 색상 합성 시험 7개, Pi 서비스 11개.
+- F103 **Debug/Release 빌드 및 Release 실물 업로드·Flash 검증 통과**.
+- Release 메모리 사용량: Flash 1640바이트, RAM 예약 포함 3712바이트.
+- YOLO11m 예제에서 사람 4명, 추적 ID·최대 박스 중심·빈 영상 대상 해제를 확인했습니다.
+- 실제 서버의 좌표 API와 LD2 점등을 재확인했습니다. 1378프레임 시점 약 12.5 FPS,
+  수신 누락 1프레임, 서버 오류 없음, STM32 UART 오류·잘못된 프레임·버퍼 넘침 0이었습니다.
+- Python 17개 파일, Bash/JavaScript 문법, 문서 내부 링크, `git diff --check`를 확인했습니다.
 
-Windows IDE를 사용할 때는 CH340을 WSL에서 먼저 detach합니다. 자동 다운로드를 지원하지 않는 어댑터는 GPIO0–GND 연결 후 RESET으로 업로드하고, 실행 시 GPIO0–GND를 해제합니다. 기존 플래시 백업과 빌드 바이너리는 저장소에 포함하지 않습니다.
+삭제 전 소스·설정·가중치와 별도 vendor 백업은 작업 PC의 `/tmp`에 저장했습니다.
+임시 백업은 저장소에 포함되지 않으며, 이후 변경은 Git 이력에서 추적합니다.
 
-## 3. 영상·YOLO 실행
+## 변경점 요약과 남은 작업
 
-저장소 루트에서 Python 환경을 만듭니다.
+현재 주 실행 경로는 **F411 LED 인원수 표시 → F103 카메라 UART 중계 + PC YOLO11m**으로 바뀌었습니다.
+전원은 STM32에서 ESP32-CAM으로 공급하고, LD2는 정상 카메라 프레임 수신 상태를 표시합니다.
+기본 영상 설정은 921600bps·320×240·청크 256/간격 250µs·수동 노출 150입니다.
+YOLO 사람 탐지와 목걸이 색상 분류는 PC에서 수행합니다.
+
+학생/직원 분류를 개선하려면 실제 목걸이가 선명하게 보이는 영상과 정답 라벨로 평가하고,
+필요하면 센서 해상도 확대와 목걸이 전용 학습을 진행해야 합니다.
+F411RE 지원은 현재 제거된 상태이므로 교체 전에 보드별 클럭·GPIO·UART·시작 코드·링커 구성을 복원해야 합니다.
+전원 공급 여유·장시간 안정성, 새 PC 설치 재현성, Pi 실물 카메라 실행도 아직 검증되지 않았습니다.
+
+## 설치와 실행
+
+Python 3.12 환경에서 저장소 루트 기준으로 실행합니다. GPU 사용에는 해당 PC에 맞는 PyTorch/CUDA 환경이 필요합니다.
 
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install -r esp32-usb-cam/requirements-yolo.txt
-.venv/bin/python esp32-usb-cam/web-preview.py --port /dev/ttyUSB0 --yolo
+.venv/bin/python -m pip install -r esp32-usb-cam/requirements-yolo.txt
+.venv/bin/python esp32-usb-cam/web-preview.py --yolo
 ```
 
-Windows 브라우저에서 **http://localhost:8765**를 엽니다. 기본 노출값은 수동 300입니다. 밝기에 따라 `--exposure 150` 등으로 조정하고, 자동 노출은 `--exposure 0`을 사용합니다. GPU 지원은 PyTorch/CUDA 설치 환경에 따라 달라지며, `--device cpu`로 CPU를 지정할 수 있습니다.
+기본값은 `/dev/ttyACM0`, 부팅 115200 → 영상 921600bps, 320×240, 수동 노출 150,
+256바이트 청크/250µs 간격, YOLO11m, 신뢰도 0.35, 추론 입력 640입니다.
+브라우저는 **http://localhost:8766**입니다. GPU가 있으면 자동 선택합니다.
 
-카메라만 확인하려면 `--yolo`를 생략합니다. 정상 실내 장면에서 약 5~6 FPS를 확인했습니다. 장면의 JPEG 크기와 UART 누락에 따라 달라집니다.
-
-## 4. STM32 빌드·업로드와 LED 전송
-
-Arm GNU Toolchain, CMake, Ninja, STM32CubeProgrammer를 설치하고 실행 파일을 PATH에 등록합니다.
+서버만 재시작해서 장치가 이미 921600bps인 경우:
 
 ```bash
-cmake -S test_1 -B test_1/build/Debug -G Ninja -DCMAKE_BUILD_TYPE=Debug
-cmake --build test_1/build/Debug
-STM32_Programmer_CLI -c port=SWD mode=UR -w test_1/build/Debug/test_1.elf -v -rst
+.venv/bin/python esp32-usb-cam/web-preview.py --yolo --initial-baud 921600
 ```
 
-YOLO 서버를 실행한 채 다른 터미널에서:
+카메라만 표시하려면 `--yolo`를 생략합니다. 자동 노출은 `--exposure 0`,
+CPU 추론은 `--device cpu`, 다른 모델은 `--model models/파일.pt`로 지정합니다.
+직렬 포트는 한 프로세스만 사용합니다. Linux 직렬 권한은 `dialout` 그룹으로 설정합니다.
+
+## 표시와 한계
+
+하늘색 줄은 학생(`student`), 검정색 줄은 직원(`staff`), 근거가 부족하면 미확인(`unknown`)입니다.
+YOLO는 사람 위치를 찾고 줄 분류는 색상·형태 규칙을 사용합니다. 목걸이 전용 학습 모델은 아닙니다.
+현재 320×240에서 작은 줄은 구분하기 어렵고, 옷의 무늬·그림자와 혼동할 수 있습니다.
+모델 확대만으로 줄 분류 정확도가 개선됐다고 검증하지 않았습니다.
+
+`/status`는 사람 박스·추적 ID·색상 분류·인원수·FPS를 반환합니다.
+`/stream`은 실시간 영상, `/raw.jpg`는 원본, `/snapshot.jpg`는 표시 영상입니다.
+박스 면적이 가장 큰 사람의 중심 좌표도 제공하며 실제 거리를 측정하지는 않습니다.
+
+## 하드웨어와 검증
+
+[STM32 배선·빌드](test_1/README.md), [ESP32 업로드·PC 실행 상세](esp32-usb-cam/README.md),
+[WSL USB 설정](usb-wsl/README.md), [타사 구성 요소](THIRD_PARTY.md)를 참고하세요.
 
 ```bash
-.venv/bin/python stm32-yolo-led/bridge.py --port /dev/ttyACM0
+.venv/bin/python -m unittest discover -s tests -v
 ```
 
-각 핀 → 330Ω 저항 → LED 긴 다리(+), LED 짧은 다리(-) → GND로 연결합니다. 1명부터 D4→D5→D6→D7 순서로 켜지고, 4명 이상이면 모두 켜집니다. D4=PB5, D5=PB4, D6=PB10, D7=PA8입니다. 내장 LD2는 최근 유효한 데이터 수신 상태를 나타냅니다.
-
-HTTP 조회와 STM32 전송은 100ms 주기이며 카메라 추론이 그보다 느리면 같은 결과를 반복 전달합니다. 카메라·추론 오류나 1초 이상 결과 정지 시 0명을 전송하고, STM32도 통신이 1초 이상 끊기면 LED를 끕니다. `bridge-status.json`에서 실제 조회 간격과 ACK 수를 확인합니다.
-
-## 좌표 API
-
-```bash
-curl -s http://localhost:8765/status
-```
-
-`person_count`, `detections`, `closest_person_x`, `closest_person`, `frame_width`, `frame_height`를 제공합니다. 사람 박스는 `xyxy: [왼쪽 x, 위쪽 y, 오른쪽 x, 아래쪽 y]`입니다.
-
-`closest_person_x = (왼쪽 x + 오른쪽 x) / 2`이며 원본 픽셀 좌표입니다. 현재 화면 중앙은 x=160입니다. 대상이 없으면 `closest_person_x`와 `closest_person`은 `null`입니다. `closest_person.track_id`는 신규 검출이 추적 궤적으로 확정되기 전에는 `null`일 수 있습니다.
-
-단안 카메라에서 **박스 면적이 가장 큰 사람을 가장 가까운 사람으로 추정**합니다. 실제 거리 측정은 아니며 체격·자세·가림에 영향을 받습니다. 선택한 대상은 노란 박스와 중심 십자로 표시됩니다. 영상 원본은 `/raw.jpg`, 표시된 프레임은 `/snapshot.jpg`에서 확인할 수 있습니다.
-
-## 검증
-
-```bash
-.venv/bin/python esp32-usb-cam/check-closest-person.py
-.venv/bin/python esp32-usb-cam/check-live-center.py
-# 실행 중인 STM32 브리지를 종료한 뒤 수행
-.venv/bin/python stm32-yolo-led/check-board.py --port /dev/ttyACM0
-```
-
-실제 보드에서 18가지 인원수·표시 모드, 검사 바이트 오류 무시, 1초 통신 중단 소등을 검증했습니다. 사람 여러 명의 예제에서 최대 면적 선택·중점 계산·추적 ID 유지·대상 해제를 확인했고, 실제 카메라 HTTP 응답에서도 중심 x좌표를 확인했습니다. 이 시험은 탐지 정확도나 실제 거리의 정확도를 보증하는 시험은 아닙니다.
-
-실행 중 카메라가 흰 화면이 되는 현상이 있었습니다. 노출값 조정만으로 복구되지 않는 경우도 있었고, 카메라 펌웨어 재기록 후 정상 영상으로 복구했습니다. `/raw.jpg`와 `/status`의 `camera_warning`으로 원본 상태를 확인합니다.
-
-YOLO 가중치·Ultralytics 및 STM32 생성 코드의 출처는 [THIRD_PARTY.md](THIRD_PARTY.md)에 기록합니다.
+프레임 파서 시험에는 호스트 GCC, 색상 시험에는 OpenCV/NumPy가 필요합니다.
+실제 카메라 중계·LD2·GPU 탐지 동작은 확인했고, 탐지 및 학생/직원 분류 정확도는
+정답 데이터로 평가하지 않았습니다. 생성 파일과 보드 Flash 백업은 Git에서 제외합니다.
