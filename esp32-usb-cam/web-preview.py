@@ -31,6 +31,7 @@ s.frames?`USB ${s.fps.toFixed(1)} FPS · 누락 ${s.dropped}`+
 (s.yolo_enabled?` · YOLO ${s.inference_fps.toFixed(1)} FPS · 사람 ${s.person_count}명 · ${s.inference_ms.toFixed(1)} ms · ${s.yolo_status}`:' · 탐지 비활성')+
 (s.yolo_enabled?` · 줄 색 추정: 학생 ${s.role_counts.student} · 직원 ${s.role_counts.staff} · 미확인 ${s.role_counts.unknown}`:'')+
 (s.yolo_enabled?(s.closest_person?` · 가까운 대상 #${s.closest_person.track_id} · 중심 x=${s.closest_person.center_x.toFixed(1)}`:' · 추적 대상 없음'):'')+
+(s.pan_enabled?` · D3 서보 ${s.pan.angle.toFixed(1)}° · ${s.pan.status}`:'')+
 (s.camera_warning?' · '+s.camera_warning:''):'카메라 연결 중…';
 }catch(e){document.getElementById('status').textContent='미리보기 서버 연결 끊김';}},500);</script></html>"""
 
@@ -43,10 +44,29 @@ state = {"jpeg": None, "raw_jpeg": None, "frames": 0, "output_frames": 0,
          "person_count": 0, "detections": [], "inference_frames": 0, "camera_warning": None,
          "role_counts": {"student": 0, "staff": 0, "unknown": 0},
          "closest_person": None, "closest_person_x": None,
-         "closest_person_method": "largest_bbox_area", "frame_width": 320, "frame_height": 240}
+         "closest_person_method": "largest_bbox_area", "frame_width": 320, "frame_height": 240,
+         "frame_received_at": 0.0, "pan_enabled": False,
+         "pan": {"angle": 90.0, "status": "대기", "target_id": None, "error": None},
+         "pan_command": "S\n", "pan_command_at": 0.0, "pan_commands_sent": 0,
+         "camera_reconnects": 0}
 
 
 def camera_worker(args):
+    initial_baud = args.initial_baud
+    while not stop.is_set():
+        session_args = argparse.Namespace(**vars(args))
+        session_args.initial_baud = initial_baud
+        camera_session(session_args)
+        if stop.is_set():
+            return
+        with condition:
+            state["camera_reconnects"] += 1
+        # Retry the operational speed, then the boot speed after a board reset.
+        initial_baud = 115200 if initial_baud == args.baud else args.baud
+        stop.wait(1)
+
+
+def camera_session(args):
     port = serial.Serial()
     port.port, port.baudrate, port.timeout = args.port, args.initial_baud, 0.2
     port.dtr = port.rts = False
@@ -68,7 +88,12 @@ def camera_worker(args):
             port.write(command)
             port.flush()
             deadline = time.monotonic() + 5
-            while port.readline().strip() != expected:
+            while True:
+                reply = port.readline().strip()
+                if reply == expected:
+                    break
+                if reply.startswith(b"CAM_ERROR"):
+                    raise RuntimeError(reply.decode("ascii", errors="replace"))
                 if time.monotonic() >= deadline:
                     raise TimeoutError("USB 전송 설정 응답 없음")
             if command.startswith(b"E"):
@@ -76,8 +101,19 @@ def camera_worker(args):
         port.baudrate = args.baud
         time.sleep(0.1)
         started = time.monotonic()
+        with condition:
+            base_frames = state["frames"]
         consecutive = 0
         while not stop.is_set():
+            if args.pan:
+                with condition:
+                    fresh = time.monotonic() - state["pan_command_at"] <= 0.4
+                    command = state["pan_command"] if fresh else "S\n"
+                    if not fresh:
+                        state["pan"]["status"] = "영상/탐지 대기: 정지"
+                port.write(command.encode("ascii"))
+                with condition:
+                    state["pan_commands_sent"] += 1
             port.write(b"F")
             port.flush()
             try:
@@ -93,8 +129,10 @@ def camera_worker(args):
             consecutive = 0
             with condition:
                 state["raw_jpeg"] = jpeg
+                state["frame_received_at"] = time.monotonic()
                 state["frames"] += 1
-                state["fps"] = state["frames"] / (time.monotonic() - started)
+                state["error"] = None
+                state["fps"] = (state["frames"] - base_frames) / (time.monotonic() - started)
                 if not args.yolo:
                     state["jpeg"] = jpeg
                     state["output_frames"] += 1
@@ -105,16 +143,35 @@ def camera_worker(args):
     except Exception as error:
         with condition:
             state["error"] = str(error)
+            state["pan_command"] = "S\n"
+            state["pan_command_at"] = 0.0
+            state["pan"]["status"] = "카메라 재연결 대기: 정지"
             condition.notify_all()
         print(f"카메라 연결 오류: {error}", flush=True)
     finally:
+        if port.is_open:
+            try:
+                if args.pan:
+                    port.write(b"S\n")
+                # A live ESP acknowledges B at the old speed before changing.
+                # If it has rebooted already, R restores the STM32 side instead.
+                port.write(b"B115200\n")
+                port.flush()
+                time.sleep(0.1)
+                if args.pan:
+                    port.write(b"R\n")
+                port.flush()
+            except (serial.SerialException, OSError):
+                pass
         port.close()
 
 
 def detector_worker(args):
     try:
         from person_detector import PersonDetector
+        from pan_tracker import PanTracker
         detector = PersonDetector(args.model, args.confidence, args.imgsz, args.device)
+        tracker = PanTracker(reverse=args.pan_reverse) if args.pan else None
         with condition:
             state["yolo_status"] = "실행 중"
             state["device"] = detector.device_name
@@ -127,6 +184,7 @@ def detector_worker(args):
                 if stop.is_set():
                     return
                 jpeg, frame_number = state["raw_jpeg"], state["frames"]
+                frame_received_at = state["frame_received_at"]
             if jpeg is None or frame_number == last_frame:
                 time.sleep(0.05)
                 continue
@@ -134,7 +192,16 @@ def detector_worker(args):
             if started is None:
                 started = time.monotonic()
             annotated, detections, duration_ms = detector.detect(jpeg)
+            pan = None
+            if tracker is not None:
+                now = time.monotonic()
+                pan = tracker.update(detections, detector.frame_width, detector.frame_height,
+                                     now, frame_age=now - frame_received_at)
             with condition:
+                if pan is not None:
+                    state["pan_command"] = pan.pop("command")
+                    state["pan_command_at"] = frame_received_at
+                    state["pan"] = pan
                 state["jpeg"] = annotated
                 state["output_frames"] += 1
                 state["inference_frames"] += 1
@@ -158,6 +225,8 @@ def detector_worker(args):
         with condition:
             state["yolo_status"] = "오류"
             state["error"] = f"YOLO: {error}"
+            state["pan_command"] = "S\n"
+            state["pan_command_at"] = 0.0
             condition.notify_all()
         print(f"YOLO 오류: {error}", flush=True)
 
@@ -232,6 +301,8 @@ def main():
     parser.add_argument("--baud", type=int, default=921600,
                         choices=(115200, 230400, 460800, 921600, 1500000, 2000000))
     parser.add_argument("--yolo", action="store_true", help="YOLO 사람 탐지 활성화")
+    parser.add_argument("--pan", action="store_true", help="F411의 D3 SG90로 사람 좌우 추적")
+    parser.add_argument("--pan-reverse", action="store_true", help="서보 장착 방향에 맞춰 좌우 반전")
     parser.add_argument("--model", type=Path, default=Path(__file__).resolve().parents[1] / "models/yolo11m.pt")
     parser.add_argument("--confidence", type=float, default=0.35)
     parser.add_argument("--imgsz", type=int, default=640)
@@ -239,6 +310,10 @@ def main():
     parser.add_argument("--exposure", type=int, default=150,
                         help="OV2640 노출: 0 자동, 1~1200 수동 (기본 150)")
     args = parser.parse_args()
+    if args.pan:
+        args.yolo = True
+    elif args.pan_reverse:
+        parser.error("pan-reverse는 pan과 함께 사용하세요")
     if not 0 <= args.gap_us <= 5000:
         parser.error("gap-us는 0~5000이어야 합니다")
     state["baud"] = args.baud
@@ -249,6 +324,7 @@ def main():
     if args.yolo and not args.model.is_file():
         parser.error(f"모델 파일 없음: {args.model}")
     state["yolo_enabled"] = args.yolo
+    state["pan_enabled"] = args.pan
     state["model"] = args.model.name if args.yolo else None
     state["yolo_status"] = "모델 준비 중" if args.yolo else "비활성"
     server = ThreadingHTTPServer(("127.0.0.1", args.http_port), Handler)

@@ -1,5 +1,8 @@
 # ESP32 촬영 및 PC 탐지
 
+F411RE의 D3 SG90 좌우 추적은 `bash esp32-usb-cam/preview.sh --pan --baud 460800 --gap-us 500`으로 실행합니다.
+배선과 검증 범위는 [F411 YOLO 서보 추적 안내](../stm32-sg90.md)를 참고하세요.
+
 현재 데이터 경로는 ESP32-CAM ↔ STM32F103RB ↔ PC입니다.
 배선과 중계 펌웨어는 [STM32 안내](../test_1/README.md), 설치 및 기본 실행은 [루트 README](../README.md)를 참고하세요.
 
