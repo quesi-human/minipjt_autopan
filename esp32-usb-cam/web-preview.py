@@ -31,7 +31,7 @@ s.frames?`USB ${s.fps.toFixed(1)} FPS · 누락 ${s.dropped}`+
 (s.yolo_enabled?` · YOLO ${s.inference_fps.toFixed(1)} FPS · 사람 ${s.person_count}명 · ${s.inference_ms.toFixed(1)} ms · ${s.yolo_status}`:' · 탐지 비활성')+
 (s.yolo_enabled?` · 줄 색 추정: 학생 ${s.role_counts.student} · 직원 ${s.role_counts.staff} · 미확인 ${s.role_counts.unknown}`:'')+
 (s.yolo_enabled?(s.closest_person?` · 가까운 대상 #${s.closest_person.track_id} · 중심 x=${s.closest_person.center_x.toFixed(1)}`:' · 추적 대상 없음'):'')+
-(s.pan_enabled?` · D3 서보 ${s.pan.angle.toFixed(1)}° · ${s.pan.status}`:'')+
+(s.pan_enabled?` · D3 서보 ${s.pan.angle.toFixed(1)}° · ${s.pan.status} · 방향 보정 ${s.pan.direction_corrections||0}회`:'')+
 (s.camera_warning?' · '+s.camera_warning:''):'카메라 연결 중…';
 }catch(e){document.getElementById('status').textContent='미리보기 서버 연결 끊김';}},500);</script></html>"""
 
